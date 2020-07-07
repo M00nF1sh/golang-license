@@ -39,14 +39,14 @@ func newAnalysisCmd(rootCmd *cobra.Command) *analysisCmd {
 		return ac.run(context.Background())
 	}
 	rootCmd.AddCommand(ac.cmd)
-	ac.cmd.Flags().StringVar(&ac.pattern, "pattern", "./...", "pattern for your package")
+	ac.cmd.Flags().StringSliceVar(&ac.patterns, "patterns", []string{"./..."}, "patterns for your package")
 	return ac
 }
 
 // analysisCmd represents the analysis command
 type analysisCmd struct {
-	cmd     *cobra.Command
-	pattern string
+	cmd      *cobra.Command
+	patterns []string
 }
 
 type DependencyInfo struct {
@@ -68,46 +68,51 @@ func (ac *analysisCmd) run(ctx context.Context) error {
 	licenseDetector := licensee.NewDetector()
 
 	analysisOutput := AnalysisOutput{}
-	dependencies, err := dependencyResolver.Resolve(ctx, ac.pattern)
-	if err != nil {
-		return err
-	}
-
-	for _, dependency := range dependencies {
-		if dependency.Module.Main {
-			continue
-		}
-
-		detectRet, err := licenseDetector.Detect(dependency)
+	proceededModuleVersions := make(map[string]struct{})
+	for _, pattern := range ac.patterns {
+		dependencies, err := dependencyResolver.Resolve(ctx, pattern)
 		if err != nil {
 			return err
 		}
-		repository, err := repositoryLocator.Locate(dependency.Module)
-		if err != nil {
-			glog.Error(errors.Wrapf(err, "failed to locate repository for %v", dependency.Module.Path))
-		}
+		for _, dependency := range dependencies {
+			if dependency.Module.Main {
+				continue
+			}
+			if _, ok := proceededModuleVersions[dependency.Module.Path+dependency.Module.Version]; ok {
+				continue
+			}
+			detectRet, err := licenseDetector.Detect(dependency)
+			if err != nil {
+				return err
+			}
+			repository, err := repositoryLocator.Locate(dependency.Module)
+			if err != nil {
+				glog.Error(errors.Wrapf(err, "failed to locate repository for %v", dependency.Module.Path))
+			}
 
-		var license string
-		var licenseAttribution string
-		var licenseContent string
-		licenseFile, err := ac.filterLicenseFiles(detectRet)
-		if err != nil {
-			license = "UNKNOWN"
-			glog.Error(errors.Wrapf(err, "failed to filter licenses for %v", dependency.Module.Path))
-		} else {
-			license = licenseFile.MatchedLicense
-			licenseAttribution = licenseFile.Attribution
-			licenseContent = licenseFile.Content
+			var license string
+			var licenseAttribution string
+			var licenseContent string
+			licenseFile, err := ac.filterLicenseFiles(detectRet)
+			if err != nil {
+				license = "UNKNOWN"
+				glog.Error(errors.Wrapf(err, "failed to filter licenses for %v", dependency.Module.Path))
+			} else {
+				license = licenseFile.MatchedLicense
+				licenseAttribution = licenseFile.Attribution
+				licenseContent = licenseFile.Content
+			}
+			dependencyInfo := DependencyInfo{
+				Module:             dependency.Module.Path,
+				Version:            dependency.Module.Version,
+				Repository:         repository,
+				License:            license,
+				LicenseAttribution: licenseAttribution,
+				LicenseContent:     licenseContent,
+			}
+			analysisOutput.Dependencies = append(analysisOutput.Dependencies, dependencyInfo)
+			proceededModuleVersions[dependency.Module.Path+dependency.Module.Version] = struct{}{}
 		}
-		dependencyInfo := DependencyInfo{
-			Module:             dependency.Module.Path,
-			Version:            dependency.Module.Version,
-			Repository:         repository,
-			License:            license,
-			LicenseAttribution: licenseAttribution,
-			LicenseContent:     licenseContent,
-		}
-		analysisOutput.Dependencies = append(analysisOutput.Dependencies, dependencyInfo)
 	}
 	payload, _ := json.Marshal(analysisOutput)
 	fmt.Println(string(payload))
